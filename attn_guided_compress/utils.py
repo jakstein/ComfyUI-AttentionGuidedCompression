@@ -120,13 +120,20 @@ def temporal_smooth(frames, method="gaussian", window=5, alpha=0.5):
         raise ValueError(f"Unknown temporal smoothing method: {method}")
 
 
-def normalize_tensor(tensor, method="minmax", low=5.0, high=95.0, eps=1e-6):
+def normalize_tensor(
+    tensor,
+    method="minmax",
+    low=5.0,
+    high=95.0,
+    eps=1e-6,
+    max_quantile_samples=1_000_000,
+):
     """
     Normalize tensor values to [0, 1] range.
 
     Args:
         tensor: input tensor (any shape)
-        method: one of "minmax", "percentile", "zscore"
+        method: one of "minmax", "percentile", "frame_percentile", "zscore"
         low: low percentile for percentile normalization
         high: high percentile for percentile normalization
         eps: numerical stability epsilon
@@ -142,9 +149,36 @@ def normalize_tensor(tensor, method="minmax", low=5.0, high=95.0, eps=1e-6):
         return (tensor.float() - mn) / (mx - mn + eps)
 
     elif method == "percentile":
-        lo = torch.quantile(flat, low / 100.0)
-        hi = torch.quantile(flat, high / 100.0)
+        if flat.numel() > max_quantile_samples:
+            step = max(1, flat.numel() // max_quantile_samples)
+            flat_for_quantile = flat[::step][:max_quantile_samples]
+        else:
+            flat_for_quantile = flat
+
+        lo = torch.quantile(flat_for_quantile, low / 100.0)
+        hi = torch.quantile(flat_for_quantile, high / 100.0)
         clipped = torch.clamp(tensor.float(), lo, hi)
+        return (clipped - lo) / (hi - lo + eps)
+
+    elif method == "frame_percentile":
+        if tensor.ndim < 3:
+            return normalize_tensor(
+                tensor,
+                "percentile",
+                low,
+                high,
+                eps,
+                max_quantile_samples,
+            )
+
+        t = tensor.float()
+        flat_frames = t.reshape(t.shape[0], -1)
+        lo = torch.quantile(flat_frames, low / 100.0, dim=1)
+        hi = torch.quantile(flat_frames, high / 100.0, dim=1)
+        view_shape = (t.shape[0],) + (1,) * (t.ndim - 1)
+        lo = lo.reshape(view_shape)
+        hi = hi.reshape(view_shape)
+        clipped = torch.clamp(t, lo, hi)
         return (clipped - lo) / (hi - lo + eps)
 
     elif method == "zscore":

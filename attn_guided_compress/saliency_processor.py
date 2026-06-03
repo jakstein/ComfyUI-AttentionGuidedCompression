@@ -44,7 +44,7 @@ def process_attention_to_qp(
         temporal_window: window size for temporal smoothing
         qp_min: most negative QP delta (best quality, high-saliency regions)
         qp_max: most positive QP delta (worst quality, low-saliency regions)
-        normalization: "minmax" | "percentile" | "zscore"
+        normalization: "minmax" | "percentile" | "frame_percentile" | "zscore"
         percentile_low: low percentile clip
         percentile_high: high percentile clip
         saliency_metric: "magnitude" (max attn weight) | "entropy" (focused-ness)
@@ -164,8 +164,8 @@ def process_attention_to_qp(
     # Clip to int8 range and cast
     qp_mb = torch.clamp(qp_mb, -128, 127).to(torch.int8)
 
-    # -- 12. Build saliency preview (single-channel image tensor) 
-    preview = torch.clamp(saliency_norm, 0.0, 1.0).unsqueeze(-1)  # [F, H, W, 1]
+    # -- 12. Build saliency preview as RGB for ComfyUI image saving
+    preview = torch.clamp(saliency_norm, 0.0, 1.0).unsqueeze(-1).expand(-1, -1, -1, 3)
 
     mb_h, mb_w = qp_mb.shape[1], qp_mb.shape[2]
 

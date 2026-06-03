@@ -133,9 +133,9 @@ class SaliencyPostProcess:
                     "default": 10.0, "min": 0.0, "max": 30.0, "step": 0.5,
                 }),
                 "normalization": ([
-                    "minmax", "percentile", "zscore",
+                    "minmax", "percentile", "frame_percentile", "zscore",
                 ], {
-                    "default": "percentile",
+                    "default": "frame_percentile",
                 }),
                 "percentile_low": ("FLOAT", {
                     "default": 5.0, "min": 0.0, "max": 50.0, "step": 0.5,
@@ -259,6 +259,7 @@ class AttnGuidedVideoCombine:
     RETURN_TYPES = ("VIDEO",)
     RETURN_NAMES = ("video_info",)
     FUNCTION = "execute"
+    OUTPUT_NODE = True
     CATEGORY = "AttentionGuidedCompression"
     DESCRIPTION = (
         "Encodes frames to video with optional per-macroblock QP deltas. "
