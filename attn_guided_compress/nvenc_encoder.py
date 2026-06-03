@@ -25,6 +25,22 @@ def find_executable(name):
     return None
 
 
+def supports_qp_delta_map(nvencc_path):
+    """Return True if the executable advertises NVIDIA sample QP map input."""
+    try:
+        result = subprocess.run(
+            [nvencc_path, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+    help_text = f"{result.stdout}\n{result.stderr}"
+    return "qpDeltaMapFile" in help_text
+
+
 def discover_encoder(preferred="nvenc"):
     """
     Return (encoder_backend, executable_path).
@@ -105,6 +121,14 @@ def encode_with_nvencc(frame_paths, qp_map_info, output_path, crf=23,
     """
     if not frame_paths:
         raise ValueError("No frame paths provided")
+
+    if not supports_qp_delta_map(nvencc_path):
+        raise RuntimeError(
+            "The selected NVEncC executable does not support --qpDeltaMapFile. "
+            "That option is from NVIDIA's NVENC sample encoder, not rigaya NVEncC "
+            "builds. Leave nvencc_path empty to use ffmpeg fallback, or use/build an "
+            "encoder that exposes NV_ENC_PIC_PARAMS::qpDeltaMap."
+        )
 
     first_frame = frame_paths[0]
     img = Image.open(first_frame)
