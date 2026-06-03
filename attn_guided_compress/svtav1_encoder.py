@@ -1,11 +1,12 @@
 """
 SVT-AV1 video encoding with per-frame ROI QP delta maps.
 
-Uses ffmpeg + libsvtav1 with the --roi-map-file parameter for per-superblock
+Uses ffmpeg + libsvtav1 with the RoiMapFile parameter for per-superblock
 QP offset maps via AV1's alternate quantizer segment feature.
 """
 
 import os
+import re
 import subprocess
 import tempfile
 import shutil
@@ -13,6 +14,23 @@ import shutil
 import numpy as np
 import torch
 from PIL import Image
+
+
+def _windows_path_for_svtav1(params_path):
+    """
+    Convert a Windows path to a form safe for svtav1-params.
+
+    The svtav1-params string uses ':' as the key:value delimiter, so a
+    Windows drive letter (e.g. C:) would be misinterpreted.  Convert
+    'C:/foo' or 'C:\\foo' to '//C/foo' (UNC-style, no colon).
+    """
+    # Already forward-slashed; check for drive letter pattern
+    m = re.match(r"^([A-Za-z]):/", params_path)
+    if m:
+        drive = m.group(1).upper()
+        rest = params_path[3:]  # everything after "C:"
+        return f"//{drive}/{rest}"
+    return params_path
 
 
 # Encoder discovery
@@ -113,11 +131,15 @@ def encode_with_svtav1(frame_paths, output_path, roi_map_path, crf, preset,
     ]
 
     if roi_map_path:
-        # Convert to forward slashes to avoid Windows path : conflicts
-        # with the svtav1-params key:value delimiter
-        roi_path_escaped = roi_map_path.replace("\\", "/")
+        # svtav1-params uses ':' as key:value delimiter, so a Windows drive
+        # letter (C:) would be misinterpreted.  Convert to UNC-style path.
+        # The SVT-AV1 config parameter name is RoiMapFile (camelCase),
+        # not roi-map-file (the CLI -- flag name).
+        roi_path_safe = _windows_path_for_svtav1(
+            roi_map_path.replace("\\", "/")
+        )
         cmd.extend([
-            "-svtav1-params", f"roi-map-file={roi_path_escaped}"
+            "-svtav1-params", f"RoiMapFile={roi_path_safe}"
         ])
 
     cmd.append(output_path)
@@ -128,7 +150,10 @@ def encode_with_svtav1(frame_paths, output_path, roi_map_path, crf, preset,
     )
 
     if result.returncode != 0:
-        print(f"[AGC] FFmpeg stderr: {result.stderr[:1000]}")
+        # Print full stderr — the actual error is often at the end
+        stderr_lines = result.stderr.strip().split("\n")
+        for line in stderr_lines[-20:]:
+            print(f"[AGC] FFmpeg: {line}")
         raise RuntimeError(
             f"FFmpeg SVT-AV1 encoding failed (exit code {result.returncode})"
         )
@@ -174,7 +199,13 @@ def encode_video(images, qp_maps_dict, output_dir, filename="output.mp4",
     svt_preset = preset_map.get(preset, "8")
 
     output_path = os.path.join(output_dir, filename)
-    tmpdir = tempfile.mkdtemp(prefix="agc_")
+    # Use short temp path to keep svtav1-params string manageable
+    short_base = os.path.join(os.environ.get("SYSTEMDRIVE", "C:"), "Temp")
+    try:
+        os.makedirs(short_base, exist_ok=True)
+        tmpdir = tempfile.mkdtemp(prefix="agc_", dir=short_base)
+    except OSError:
+        tmpdir = tempfile.mkdtemp(prefix="agc_")
 
     try:
         # Resolve ffmpeg
