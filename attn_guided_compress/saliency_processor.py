@@ -2,7 +2,7 @@
 Saliency post-processing pipeline.
 
 Converts raw cross-attention maps captured during sampling into per-frame
-QP delta maps suitable for NVENC's qpDeltaMap feature.
+QP delta maps suitable for SVT-AV1's --roi-map-file feature.
 """
 
 import torch
@@ -53,9 +53,9 @@ def process_attention_to_qp(
 
     Returns:
         qp_maps: dict with
-            - "qp_maps": tensor [F, mb_H, mb_W]  int8  (signed QP deltas)
+            - "qp_maps": tensor [F, mb_H, mb_W]  int8  (signed QP deltas, clamped to [-63, 63])
             - "saliency_preview": tensor [F, H, W, 1]  float  (for visualization)
-            - "mb_h", "mb_w": macroblock grid dimensions
+            - "mb_h", "mb_w": 64x64 superblock grid dimensions
     """
     num_frames, img_h, img_w, _ = images.shape
 
@@ -159,10 +159,10 @@ def process_attention_to_qp(
     qp_deltas = linear_map(saliency_norm, 0.0, 1.0, qp_max, qp_min)
 
     # -- 11. Downsample to macroblock resolution 
-    qp_mb = pool_to_macroblocks(qp_deltas, mb_size=16)
+    qp_mb = pool_to_macroblocks(qp_deltas, mb_size=64)
 
-    # Clip to int8 range and cast
-    qp_mb = torch.clamp(qp_mb, -128, 127).to(torch.int8)
+    # Clip to AV1 ROI offset range [-63, 63] and cast
+    qp_mb = torch.clamp(qp_mb, -63, 63).to(torch.int8)
 
     # -- 12. Build saliency preview as RGB for ComfyUI image saving
     preview = torch.clamp(saliency_norm, 0.0, 1.0).unsqueeze(-1).expand(-1, -1, -1, 3)

@@ -12,7 +12,7 @@ import torch
 
 from .attention_extractor import CrossAttentionCapture
 from .saliency_processor import process_attention_to_qp
-from .nvenc_encoder import encode_video
+from .svtav1_encoder import encode_video
 
 import folder_paths
 
@@ -162,7 +162,7 @@ class SaliencyPostProcess:
     FUNCTION = "execute"
     CATEGORY = "AttentionGuidedCompression"
     DESCRIPTION = (
-        "Processes captured attention maps into QP delta maps for NVENC "
+        "Processes captured attention maps into QP delta maps for SVT-AV1 "
         "encoding.  Also outputs a saliency preview image."
     )
 
@@ -209,8 +209,8 @@ class SaliencyPostProcess:
 
 class AttnGuidedVideoCombine:
     """
-    Encodes image frames to video using NVENC.  When QP maps are provided
-    and NVEncC is available, applies per-macroblock QP deltas for
+    Encodes image frames to video using SVT-AV1.  When QP maps are provided,
+    applies per-superblock QP deltas via the ROI map feature for
     perceptual quality optimization.
     """
 
@@ -224,19 +224,15 @@ class AttnGuidedVideoCombine:
                     "default": 24, "min": 1, "max": 120, "step": 1,
                 }),
                 "crf": ("INT", {
-                    "default": 23, "min": 0, "max": 51, "step": 1,
+                    "default": 28, "min": 0, "max": 63, "step": 1,
                 }),
-                "format": (["mp4", "webm", "mov", "mkv"], {
+                "format": (["mp4", "webm", "mkv"], {
                     "default": "mp4",
                 }),
-                "video_codec": (
-                    ["hevc_nvenc", "h264_nvenc", "libx265", "libx264"],
-                    {"default": "hevc_nvenc"},
-                ),
                 "preset": (
-                    ["p1", "p2", "p3", "p4", "p5", "p6", "p7",
-                     "slow", "medium", "fast", "faster"],
-                    {"default": "p4"},
+                    ["4", "6", "8", "10", "11", "13",
+                     "fast", "medium", "slow", "faster", "slower", "veryfast"],
+                    {"default": "8"},
                 ),
                 "pix_fmt": (["yuv420p", "yuv422p", "yuv444p"], {
                     "default": "yuv420p",
@@ -247,9 +243,6 @@ class AttnGuidedVideoCombine:
             },
             "optional": {
                 "audio": ("AUDIO",),
-                "nvencc_path": ("STRING", {
-                    "default": "",
-                }),
                 "ffmpeg_path": ("STRING", {
                     "default": "",
                 }),
@@ -262,20 +255,17 @@ class AttnGuidedVideoCombine:
     OUTPUT_NODE = True
     CATEGORY = "AttentionGuidedCompression"
     DESCRIPTION = (
-        "Encodes frames to video with optional per-macroblock QP deltas. "
-        "Requires NVEncC for QP map support; falls back to ffmpeg NVENC."
+        "Encodes frames to video with SVT-AV1 and optional per-superblock QP deltas "
+        "via the ROI map feature."
     )
 
-    def execute(self, images, qp_maps, fps, crf, format, video_codec,
-                preset, pix_fmt, filename_prefix, audio=None,
-                nvencc_path="", ffmpeg_path=""):
+    def execute(self, images, qp_maps, fps, crf, format, preset,
+                pix_fmt, filename_prefix, audio=None, ffmpeg_path=""):
 
         num_frames = images.shape[0]
         ext = f".{format}"
         filename = f"{filename_prefix}{ext}"
 
-        # Resolve encoder paths
-        nv_path = nvencc_path if nvencc_path else None
         ff_path = ffmpeg_path if ffmpeg_path else None
 
         result = encode_video(
@@ -284,12 +274,10 @@ class AttnGuidedVideoCombine:
             output_dir=OUTPUT_DIR,
             filename=filename,
             format=format,
-            video_codec=video_codec,
             crf=crf,
             preset=preset,
             fps=fps,
             pix_fmt=pix_fmt,
-            nvencc_path=nv_path,
             ffmpeg_path=ff_path,
         )
 
