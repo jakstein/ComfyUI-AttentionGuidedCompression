@@ -85,15 +85,18 @@ def process_attention_to_qp(
             continue
 
         if saliency_metric == "magnitude":
-            # Max attention weight across conditioning tokens per spatial position.
-            saliency_tensors.append(t.max(dim=-1).values.mean(dim=0))
+            # Already reduced to [batch*heads, total_tokens] by early GPU reduction.
+            # Average across heads dimension.
+            saliency_tensors.append(t.mean(dim=0))
         elif saliency_metric == "entropy":
             # Negative normalized entropy: focused attention -> higher saliency.
+            # t: [batch*heads, total_tokens, text_tokens]
             entropy = compute_attention_entropy(t)
             max_entropy = torch.log(
                 torch.tensor(t.shape[-1], dtype=t.dtype, device=t.device)
             )
-            saliency_tensors.append((1.0 - entropy / max_entropy).mean(dim=0))
+            # Reduce over both heads (dim=0) and text_tokens (dim=-1)
+            saliency_tensors.append((1.0 - entropy / max_entropy).mean(dim=0).mean(dim=-1))
         else:
             raise ValueError(f"Unknown saliency_metric: {saliency_metric}")
 

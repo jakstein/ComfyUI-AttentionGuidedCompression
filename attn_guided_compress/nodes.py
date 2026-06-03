@@ -41,6 +41,17 @@ class AttnGuidedModelPatch:
                     "default": 40, "min": 0, "max": 127, "step": 1,
                     "display": "number",
                 }),
+                "saliency_metric": ([
+                    "magnitude", "entropy",
+                ], {
+                    "default": "magnitude",
+                }),
+                "capture_step_interval": ("INT", {
+                    "default": 1, "min": 1, "max": 50, "step": 1,
+                    "display": "number",
+                }),
+            },
+            "optional": {
                 "capture_last_step_only": ("BOOLEAN", {
                     "default": False,
                 }),
@@ -53,11 +64,15 @@ class AttnGuidedModelPatch:
     CATEGORY = "AttentionGuidedCompression"
     DESCRIPTION = (
         "Patches cross-attention layers to capture attention maps during "
-        "diffusion sampling.  Connect the patched model to your KSampler, "
+        "diffusion sampling.  saliency_metric controls on-GPU reduction. "
+        "capture_step_interval=N captures every Nth sampling step "
+        "(1=all steps, 2=half, etc.). "
+        "Connect the patched model to your KSampler, "
         "then pass the attn_capture handle to SaliencyPostProcess."
     )
 
-    def execute(self, model, layer_start, layer_end, capture_last_step_only):
+    def execute(self, model, layer_start, layer_end, saliency_metric,
+                capture_step_interval, capture_last_step_only=False):
         if layer_start > layer_end:
             raise ValueError(
                 f"layer_start ({layer_start}) must be <= layer_end ({layer_end})"
@@ -67,6 +82,8 @@ class AttnGuidedModelPatch:
             layer_start=layer_start,
             layer_end=layer_end,
             capture_last_step_only=capture_last_step_only,
+            saliency_metric=saliency_metric,
+            capture_step_interval=capture_step_interval,
         )
 
         m = model.clone()
@@ -92,8 +109,9 @@ class AttnGuidedModelPatch:
         m.model_options["transformer_options"] = to
 
         print(
-            f"[AGC] Installed optimized_attention_override + block wrappers for layers {layer_start}-{layer_end} "
-            f"(capture_last_step_only={capture_last_step_only})"
+            f"[AGC] Installed attention capture: layers {layer_start}-{layer_end}, "
+            f"metric={saliency_metric}, step_interval={capture_step_interval}, "
+            f"last_step_only={capture_last_step_only}"
         )
         print(f"[AGC] DEBUG: transformer_options keys: {list(to.keys())}")
         print(f"[AGC] DEBUG: patches_replace['dit'] has {len(dit_patches)} block wrappers")

@@ -79,15 +79,21 @@ class CrossAttentionCapture:
     """
 
     def __init__(self, layer_start: int, layer_end: int,
-                 capture_last_step_only: bool = False):
+                  capture_last_step_only: bool = False,
+                  saliency_metric: str = "magnitude",
+                  capture_step_interval: int = 1):
         self.layer_start = layer_start
         self.layer_end = layer_end
         self.capture_last_step_only = capture_last_step_only
-        # layer_idx -> tensor  [batch*heads, total_tokens, text_tokens]  (CPU float32)
+        self.saliency_metric = saliency_metric
+        self.capture_step_interval = capture_step_interval
+        # layer_idx -> tensor  (magnitude: [batch*heads, total_tokens],
+        #                       entropy/full: [batch*heads, total_tokens, text_tokens])
         self._maps: dict[int, torch.Tensor] = {}
         # layer_idx -> int  (number of steps accumulated)
         self._counts: dict[int, int] = {}
         self._lock = threading.Lock()
+        self._last_captured_step = None
         self._latent_shape_inferred = None  # (latent_t, latent_h, latent_w)
         self._debug_printed = False
         self._override_called = False
@@ -151,7 +157,23 @@ class CrossAttentionCapture:
                 cond_idx = cond_or_uncond.index(0)
                 b = q.shape[0] // len(cond_or_uncond)
                 n_slices = heads * b
-                captured = sim[n_slices * cond_idx: n_slices * (cond_idx + 1)].float().cpu()
+                cond_sim = sim[n_slices * cond_idx: n_slices * (cond_idx + 1)].float()
+
+                # -- Step interval filtering --
+                # Only skip when both sampling_step and last_captured_step are known.
+                # If sampling_step is missing from transformer_options, capture every step.
+                if not capture.capture_last_step_only:
+                    current_step = transformer_options.get("sampling_step")
+                    if current_step is not None and capture._last_captured_step is not None:
+                        if (current_step - capture._last_captured_step) < capture.capture_step_interval:
+                            return out  # skip this step
+                    capture._last_captured_step = current_step
+
+                # -- Early reduction for magnitude metric --
+                if capture.saliency_metric == "magnitude":
+                    captured = cond_sim.max(dim=-1).values.cpu()
+                else:
+                    captured = cond_sim.cpu()
 
                 with capture._lock:
                     layer_key = block_index
@@ -211,7 +233,9 @@ class CrossAttentionCapture:
         Return averaged attention maps per layer.
 
         Returns:
-            {layer_idx: [batch*heads, total_tokens, text_tokens]}
+            {layer_idx: tensor}
+            - magnitude metric: [batch*heads, total_tokens]
+            - entropy metric: [batch*heads, total_tokens, text_tokens]
         """
         result = {}
         for layer_idx, tensor in self._maps.items():
@@ -241,6 +265,7 @@ class CrossAttentionCapture:
     def clear(self):
         self._maps.clear()
         self._counts.clear()
+        self._last_captured_step = None
         self._latent_shape_inferred = None
         self._debug_printed = False
         self._override_called = False
