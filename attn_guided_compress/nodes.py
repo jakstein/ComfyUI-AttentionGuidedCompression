@@ -71,15 +71,32 @@ class AttnGuidedModelPatch:
 
         m = model.clone()
 
+        # Build transformer_options from scratch to avoid reference issues
+        to = m.model_options.get("transformer_options", {}).copy()
+
+        # Install optimized_attention_override to intercept all attention calls
+        override_fn = capture.create_attention_override()
+        to["optimized_attention_override"] = override_fn
+
+        # Build patches_replace["dit"] with block wrappers for each target layer
+        patches_replace = to.get("patches_replace", {}).copy()
+        dit_patches = patches_replace.get("dit", {}).copy()
+
         for layer_idx in range(layer_start, layer_end + 1):
-            patch_fn = capture.create_attn2_patch(layer_idx)
-            # For DiT models (LTX, etc.) blocks are named ("input", idx)
-            m.set_model_attn2_replace(patch_fn, "input", layer_idx)
+            block_key = ("double_block", layer_idx)
+            if block_key not in dit_patches:
+                dit_patches[block_key] = capture.create_block_wrapper(layer_idx)
+
+        patches_replace["dit"] = dit_patches
+        to["patches_replace"] = patches_replace
+        m.model_options["transformer_options"] = to
 
         print(
-            f"[AGC] Patched attn2 in layers {layer_start}-{layer_end} "
+            f"[AGC] Installed optimized_attention_override + block wrappers for layers {layer_start}-{layer_end} "
             f"(capture_last_step_only={capture_last_step_only})"
         )
+        print(f"[AGC] DEBUG: transformer_options keys: {list(to.keys())}")
+        print(f"[AGC] DEBUG: patches_replace['dit'] has {len(dit_patches)} block wrappers")
 
         return (m, capture,)
 
@@ -155,6 +172,7 @@ class SaliencyPostProcess:
                 saliency_metric, vae_scale_spatial, vae_scale_temporal):
 
         if not attn_capture.has_data():
+            print(f"[AGC] DEBUG: No attention data. override_called={attn_capture._override_called}, wrapper_called={attn_capture._wrapper_called}")
             raise RuntimeError(
                 "No attention data captured.  "
                 "Make sure you ran KSampler with the patched model."

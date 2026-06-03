@@ -73,39 +73,52 @@ def process_attention_to_qp(
             "Make sure you ran KSampler with the patched model."
         )
 
-    # Stack all layer maps: [num_layers, batch*heads, total_tokens, text_tokens]
-    layer_tensors = []
+    # Convert each compatible attention tensor to saliency first. The fallback
+    # capture path may see non-video cross-attention; keep only tensors whose
+    # query sequence matches the inferred latent video grid.
+    saliency_tensors = []
+    skipped_shapes = []
     for layer_idx in sorted(aggregated.keys()):
         t = aggregated[layer_idx]
-        layer_tensors.append(t)
-    all_maps = torch.stack(layer_tensors, dim=0)
+        if t.shape[1] != total_tokens:
+            skipped_shapes.append((layer_idx, tuple(t.shape)))
+            continue
 
-    # -- 3. Saliency metric
-    if saliency_metric == "magnitude":
-        # Max attention weight across text tokens per spatial position
-        # [num_layers, batch*heads, total_tokens]
-        saliency = all_maps.max(dim=-1).values
+        if saliency_metric == "magnitude":
+            # Max attention weight across conditioning tokens per spatial position.
+            saliency_tensors.append(t.max(dim=-1).values.mean(dim=0))
+        elif saliency_metric == "entropy":
+            # Negative normalized entropy: focused attention -> higher saliency.
+            entropy = compute_attention_entropy(t)
+            max_entropy = torch.log(
+                torch.tensor(t.shape[-1], dtype=t.dtype, device=t.device)
+            )
+            saliency_tensors.append((1.0 - entropy / max_entropy).mean(dim=0))
+        else:
+            raise ValueError(f"Unknown saliency_metric: {saliency_metric}")
 
-    elif saliency_metric == "entropy":
-        # Negative normalized entropy: focused attention -> higher saliency
-        # [num_layers, batch*heads, total_tokens, text_tokens]
-        entropy = compute_attention_entropy(all_maps)
-        max_entropy = torch.log(
-            torch.tensor(all_maps.shape[-1], dtype=all_maps.dtype, device=all_maps.device)
+    if skipped_shapes:
+        print(
+            f"[AGC] Skipped {len(skipped_shapes)} captured attention tensor(s) "
+            f"that did not match latent token count {total_tokens}: {skipped_shapes[:3]}"
         )
-        saliency = 1.0 - entropy / max_entropy
-        # [num_layers, batch*heads, total_tokens]
 
-    else:
-        raise ValueError(f"Unknown saliency_metric: {saliency_metric}")
+    if not saliency_tensors:
+        captured_shapes = [(idx, tuple(t.shape)) for idx, t in sorted(aggregated.items())]
+        raise RuntimeError(
+            "No captured attention maps matched the inferred latent token count "
+            f"{total_tokens}. Captured shapes: {captured_shapes}"
+        )
 
-    # -- 4. Average across layers and batch×heads
+    saliency = torch.stack(saliency_tensors, dim=0)
+
+    # -- 4. Average across layers / fallback shape buckets
     # NOTE: This assumes batch_size == 1 (the ComfyUI video norm).
     #   With batch > 1, the saliency from different frames gets mixed together
     #   because the captured shape is [num_layers, batch*heads, total_tokens].
     #   Supporting batch > 1 would require splitting the batch*heads dimension
     #   and producing per-frame saliency maps before averaging.
-    saliency = saliency.mean(dim=(0, 1))  # [total_tokens]
+    saliency = saliency.mean(dim=0)  # [total_tokens]
 
     # -- 5. Reshape to (latent_t, latent_h, latent_w) 
     saliency = saliency.reshape(latent_t, latent_h, latent_w)

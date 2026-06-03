@@ -77,6 +77,8 @@ def temporal_smooth(frames, method="gaussian", window=5, alpha=0.5):
 
     if method == "gaussian":
         window = min(window, num_frames)
+        if window % 2 == 0:
+            window -= 1
         if window < 3:
             return frames
 
@@ -85,14 +87,14 @@ def temporal_smooth(frames, method="gaussian", window=5, alpha=0.5):
         kernel_1d = torch.exp(-0.5 * ((t - (window - 1) / 2) / sigma) ** 2)
         kernel_1d /= kernel_1d.sum()
 
-        # Convolve along temporal axis using 1D convolution
-        # [F, ...] -> [1, F, ...] for conv1d on dim 1
-        x = frames.unsqueeze(0)  # [1, F, ...]
-        kernel = kernel_1d.view(1, 1, window)  # [1, 1, window]
+        # Convolve along temporal axis for each pixel/channel series.
+        original_shape = frames.shape
+        x = frames.reshape(num_frames, -1).transpose(0, 1).unsqueeze(1)
+        kernel = kernel_1d.view(1, 1, window)
         pad = window // 2
         x_padded = F.pad(x, (pad, pad), mode="reflect")
-        out = F.conv1d(x_padded, kernel, groups=1)
-        return out.squeeze(0)
+        out = F.conv1d(x_padded, kernel)
+        return out.squeeze(1).transpose(0, 1).reshape(original_shape)
 
     elif method == "median":
         window = min(window, num_frames)

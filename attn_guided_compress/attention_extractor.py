@@ -1,17 +1,16 @@
 """
-Cross-attention capture for DiT models (LTX 2.3, etc.).
+Cross-attention capture for DiT models (LTX 2.3, LTXAV, etc.).
 
-Patches attn2 (cross-attention) in selected transformer blocks to record
-attention score matrices during sampling.  Captured maps are stored on CPU
-to avoid VRAM pressure.
+Uses optimized_attention_override to intercept attention at the CrossAttention
+level, with dit block wrappers to inject block_index into transformer_options.
 """
 
 import threading
+import math
 import torch
 from torch import einsum
 from einops import rearrange, repeat
 
-# Explicit attention that also returns the softmax attention matrix
 
 def attention_with_scores(q, k, v, heads, mask=None, attn_precision=None):
     """
@@ -71,15 +70,12 @@ def attention_with_scores(q, k, v, heads, mask=None, attn_precision=None):
     return out, sim
 
 
-# Capture buffer
-
 class CrossAttentionCapture:
     """
     Holds cross-attention maps captured during diffusion sampling.
 
-    Each entry is keyed by layer index and stores either:
-      - a running sum + count  (when capturing all steps)
-      - the last-step tensor   (when capture_last_step_only=True)
+    Uses optimized_attention_override to intercept attention at the lowest
+    level, detecting cross-attention by q/k sequence length mismatch.
     """
 
     def __init__(self, layer_start: int, layer_end: int,
@@ -93,45 +89,122 @@ class CrossAttentionCapture:
         self._counts: dict[int, int] = {}
         self._lock = threading.Lock()
         self._latent_shape_inferred = None  # (latent_t, latent_h, latent_w)
+        self._debug_printed = False
+        self._override_called = False
+        self._wrapper_called = False
+        self._fallback_printed = False
+        self._fallback_shape_keys: dict[tuple[int, int], int] = {}
 
-    # -- patch factory 
+    # -- override factory
 
-    def create_attn2_patch(self, layer_idx: int):
-        """Return a function suitable for set_model_attn2_replace."""
+    def create_attention_override(self):
+        """
+        Return a function suitable for transformer_options["optimized_attention_override"].
 
-        def patch_fn(q, k, v, extra_options):
-            heads = extra_options["n_heads"]
-            cond_or_uncond = extra_options["cond_or_uncond"]
-            attn_precision = extra_options.get("attn_precision", None)
+        Signature: override(orig_func, q, k, v, heads, mask=None, attn_precision=None, transformer_options={}, **kwargs)
+        """
+        capture = self
 
+        def override(orig_func, q, k, v, heads, mask=None, attn_precision=None, transformer_options={}, **kwargs):
+            if not capture._override_called:
+                print(f"[AGC] DEBUG: optimized_attention_override CALLED! transformer_options keys: {list(transformer_options.keys()) if transformer_options else 'NONE'}")
+                capture._override_called = True
+
+            block_index = transformer_options.get("agc_block_index", None)
+
+            # Only capture in target layer range when block wrappers are active.
+            # Some model paths (for example LTX/FLUX via MultimodalGuider) call
+            # optimized_attention_override but do not use patches_replace["dit"].
+            # In that case there is no layer index, so fall back to shape buckets.
+            if block_index is not None and (
+                block_index < capture.layer_start or block_index > capture.layer_end
+            ):
+                return orig_func(q, k, v, heads, mask=mask, attn_precision=attn_precision, transformer_options=transformer_options, **kwargs)
+
+            # Detect cross-attention: q seq len != k seq len
+            is_cross_attn = q.shape[1] != k.shape[1]
+
+            if not is_cross_attn:
+                return orig_func(q, k, v, heads, mask=mask, attn_precision=attn_precision, transformer_options=transformer_options, **kwargs)
+
+            if block_index is None and not capture._fallback_printed:
+                print(
+                    "[AGC] DEBUG: No block wrapper context; capturing cross-attention "
+                    "by q/k sequence shape instead of layer range"
+                )
+                capture._fallback_printed = True
+
+            # This is cross-attention — compute explicit attention to capture scores
             out, sim = attention_with_scores(
-                q, k, v, heads, attn_precision=attn_precision,
+                q, k, v, heads, mask=mask, attn_precision=attn_precision,
             )
 
-            # Capture only the conditional pass (index 0 in cond_or_uncond)
-            if 0 in cond_or_uncond:
+            # Debug: print once
+            if not capture._debug_printed:
+                layer_desc = block_index if block_index is not None else "shape-bucket"
+                print(f"[AGC] Capturing cross-attn: layer={layer_desc}, q_seq={q.shape[1]}, k_seq={k.shape[1]}, heads={heads}")
+                capture._debug_printed = True
+
+            # Capture conditional pass only
+            cond_or_uncond = transformer_options.get("cond_or_uncond", None)
+            if cond_or_uncond is not None and 0 in cond_or_uncond:
                 cond_idx = cond_or_uncond.index(0)
                 b = q.shape[0] // len(cond_or_uncond)
                 n_slices = heads * b
                 captured = sim[n_slices * cond_idx: n_slices * (cond_idx + 1)].float().cpu()
 
-                with self._lock:
-                    if self.capture_last_step_only:
-                        self._maps[layer_idx] = captured
-                        self._counts[layer_idx] = 1
+                with capture._lock:
+                    layer_key = block_index
+                    if layer_key is None:
+                        shape_key = (int(q.shape[1]), int(k.shape[1]))
+                        layer_key = capture._fallback_shape_keys.get(shape_key)
+                        if layer_key is None:
+                            layer_key = -(len(capture._fallback_shape_keys) + 1)
+                            capture._fallback_shape_keys[shape_key] = layer_key
+
+                    if capture.capture_last_step_only:
+                        capture._maps[layer_key] = captured
+                        capture._counts[layer_key] = 1
                     else:
-                        if layer_idx not in self._maps:
-                            self._maps[layer_idx] = captured.clone()
-                            self._counts[layer_idx] = 1
+                        if layer_key not in capture._maps:
+                            capture._maps[layer_key] = captured.clone()
+                            capture._counts[layer_key] = 1
                         else:
-                            self._maps[layer_idx] += captured
-                            self._counts[layer_idx] += 1
+                            capture._maps[layer_key] += captured
+                            capture._counts[layer_key] += 1
 
             return out
 
-        return patch_fn
+        return override
 
-    # -- aggregation 
+    def create_block_wrapper(self, block_index: int):
+        """
+        Create a dit block wrapper that injects agc_block_index into transformer_options.
+
+        This is used with patches_replace["dit"][("double_block", i)] to ensure
+        the attention override knows which block it's running in.
+        """
+        capture = self
+
+        def wrapper(args, kwargs):
+            if not capture._wrapper_called:
+                print(f"[AGC] DEBUG: Block wrapper FIRST CALL for layer {block_index}")
+                capture._wrapper_called = True
+
+            to = args.get("transformer_options", {})
+            if to is None:
+                to = {}
+            to = to.copy()
+            to["agc_block_index"] = block_index
+
+            args_copy = args.copy()
+            args_copy["transformer_options"] = to
+
+            return kwargs["original_block"](args_copy)
+
+        return wrapper
+
+    # -- aggregation
 
     def get_aggregated(self) -> dict[int, torch.Tensor]:
         """
@@ -152,9 +225,9 @@ class CrossAttentionCapture:
         """
         Infer (latent_t, latent_h, latent_w) from image resolution and frame count.
         """
-        latent_h = image_h // vae_scale_spatial
-        latent_w = image_w // vae_scale_spatial
-        latent_t = max(1, num_frames // vae_scale_temporal)
+        latent_h = math.ceil(image_h / vae_scale_spatial)
+        latent_w = math.ceil(image_w / vae_scale_spatial)
+        latent_t = max(1, math.ceil(num_frames / vae_scale_temporal))
         self._latent_shape_inferred = (latent_t, latent_h, latent_w)
         return self._latent_shape_inferred
 
@@ -169,3 +242,8 @@ class CrossAttentionCapture:
         self._maps.clear()
         self._counts.clear()
         self._latent_shape_inferred = None
+        self._debug_printed = False
+        self._override_called = False
+        self._wrapper_called = False
+        self._fallback_printed = False
+        self._fallback_shape_keys.clear()
