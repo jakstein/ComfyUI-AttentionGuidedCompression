@@ -1,0 +1,14 @@
+[project]
+name = "ComfyUI-AttentionGuidedCompression"
+version = "0.1.0"
+description = "Attention-guided perceptual video compression for ComfyUI using diffusion model cross-attention as artificial saliency maps for NVENC QP delta encoding"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/jakstein/ComfyUI-AttentionGuidedCompression"
+
+[tool.comfy]
+publication-date = "2026-06-03"
+comfy-version = "1.0.0"
